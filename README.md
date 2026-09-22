@@ -1,147 +1,218 @@
-# HydraLance
+# HydraDex
 
-HydraLance is a VS Code extension that provides intelligent language support for [Hydra](https://hydra.cc/) configuration files. It bridges the gap between YAML configuration files and Python code by leveraging Pylance to provide code intelligence for `_target_` references, parameter completion, and indexes `.yaml` files to resolve Hydra interpolations.
+Hydra configuration intelligence as a **Python library and standalone language
+server**, with **LazyVim / Neovim** as the primary editor target.
 
-If you find HydraLance useful, please consider giving it a ⭐ on [GitHub](https://github.com/sciai-lab/hydralance)!
-
-![HydraLance Demo](https://github.com/sciai-lab/hydralance/raw/main/resources/demo.gif)
+HydraDex connects YAML `_target_` values to Python code and indexes Hydra
+configuration references. Version 0.2 is a complete rewrite of the original
+VS Code extension. Python analysis runs through [ty](https://github.com/astral-sh/ty),
+using its standard LSP interface.
 
 ## Features
 
-### 1. Go-to-Definition for `_target_` Values
-Navigate directly from YAML configurations to Python source code:
-
-```yaml
-model:
-  _target_: torch.nn.Linear  # Ctrl+Click to go to PyTorch source
-  in_features: 128
-  out_features: 64
-```
-
-Pro tip: Use `Ctrl+Shift+F10` to peek at the definition without leaving your current context.
-
-### 2. Auto-completion for `_target_` Values
-Get intelligent suggestions for Python modules, classes, and functions:
-
-```yaml
-model:
-  _target_: torch.nn.  # Auto-complete shows Linear, Conv2d, etc.
-```
-
-### 3. Parameter Auto-completion
-Get intelligent parameter suggestions based on the target class/function signature:
-
-```yaml
-model:
-  _target_: torch.nn.Linear
-  # Type here to get completions for: in_features, out_features, bias
-  
-optimizer:
-  _target_: torch.optim.Adam
-  # Type here to get completions for: lr, betas, eps, weight_decay, amsgrad, ...
-```
-
-### 5. Defaults List Navigation
-Navigate to referenced config files in Hydra defaults lists:
+- Go to Python definitions from `_target_` values, including re-exports and methods.
+- Complete Python module/class/function names, including partially typed targets.
+- Complete constructor and function keyword parameters; omit existing YAML keys,
+  positional-only arguments, and variadic parameter names.
+- Complete override keys and Python parameters inherited through literal defaults
+  references, including nested config groups and `_self_` precedence.
+- Hover for Python documentation and resolved defaults-list filenames.
+- Navigate defaults entries, including groups, `override`, `optional`, package
+  suffixes, option lists, absolute groups, and `.yaml` / `.yml` files.
+- Navigate `${path.to.key}` interpolations across workspace YAML files, with
+  ranked matches, workspace isolation, `# @package`, and relative `${.key}` /
+  `${..key}` references.
+- Report YAML syntax errors and unresolved static Python targets.
+- Track unsaved YAML buffers, incremental edits, file changes, and workspace folders.
 
 ```yaml
 defaults:
-  - default              # Ctrl+Click to go to .default.yaml
-  - dataset: imagenet    # Ctrl+Click to open ./dataset/imagenet.yaml
-```
+  - model: small              # gd opens model/small.yaml
 
-Resolved filenames are displayed on hover.
-
-### 4. Interpolation Resolution
-Navigate between Hydra config interpolations across your entire project:
-
-```yaml
-# In config/dataset/imagenet.yaml
-name: imagenet_1k
-classes: 1000
-
-# In config/experiment/main.yaml  
-experiment:
-  dataset_name: "${dataset.name}"     # Ctrl+Click to go to definition(s)
-```
-
-**Features:**
-- **Cross-file resolution**: Find interpolation targets across your entire workspace
-- **Smart filtering**: Multiple match filtering options (all, top matches, perfect matches)
-- **Workspace isolation**: Keep matches within workspace boundaries
-- **Level-based ranking**: Most specific matches shown first
-
-### 6. Error Detection and Linting
-Invalid `_target_` references are highlighted with error diagnostics:
-
-```yaml
 model:
-  _target_: torch.nn.InvalidClass  # Shows error: cannot be resolved
+  _target_: my_app.Model      # gd opens Python; K shows documentation
+  width: 128                 # completion offers remaining constructor parameters
+
+training:
+  model_width: ${model.width} # gd jumps to the YAML key
 ```
 
-## How It Works
+## Install
 
-HydraLance uses multiple approaches:
+Requires Python **3.11+**. From a checkout:
 
-### For `_target_` Features:
-1. **Shadow Documents**: Creates virtual Python files containing import statements derived from `_target_` values
-2. **Pylance Integration**: Leverages Pylance's language server capabilities for Python symbol resolution
-3. **Parameter Extraction**: Uses signature help to get parameter information from Python functions/classes
+```sh
+uv tool install .
+hydradex --version
+```
 
-### For Interpolation Resolution:
-1. **Workspace Indexing**: Scans and indexes all YAML files in your workspace
-2. **Reverse Path Matching**: Builds a reverse lookup index for efficient interpolation resolution
-3. **Logical Path Construction**: Maps file paths and YAML keys to Hydra's logical namespace
+Or install into your project's environment:
 
-## Requirements
+```sh
+pip install -e .
+```
 
-- **Pylance Extension**: HydraLance requires the [Pylance extension](https://marketplace.visualstudio.com/items?itemName=ms-python.vscode-pylance) to function
-- **Python Environment**: A configured Python environment with the packages you're referencing in your configurations
+`ty` is included as the Python analysis backend.
 
-## Installation
+The server starts with `hydradex --stdio` or `python -m hydradex`. Logging goes
+to stderr, leaving stdout exclusively for LSP messages.
 
-1. Install the Pylance extension (you probably already have it)
-2. Install HydraLance from the VS Code marketplace
-3. Open a YAML file with Hydra configurations
+## Runnable examples
 
-The extension will automatically:
-- Check for Pylance availability
-- Wait for Pylance to be ready
-- Index your YAML files for interpolation resolution
-- Create a `hydralance/` folder for temporary files
-- Offer to add this folder to your `.gitignore`
+[`examples/conf/`](examples/conf/) contains model, dataset, and optimizer configs
+with real Python targets, plus an experiment that overrides the base values.
 
-## Settings
+```sh
+uv run --extra examples python -m examples.train
+uv run --extra examples python -m examples.train --config-name experiment
+```
 
-### Core Settings
-* **`hydralance.hideHelperFolder`** *(boolean, default: true)*  
-  Hide the `hydralance` folder from the VS Code explorer
+In `examples/conf/experiment.yaml`, complete `dro` under `model:` to get `dropout`
+from the inherited Python constructor, or `ba` under `training:` to get
+`batch_size` from the base config. See [the walkthrough](examples/README.md).
 
-* **`hydralance.showOutputOnError`** *(boolean, default: false)*  
-  Automatically open the HydraLance output channel only when you explicitly opt in to seeing logs as soon as an internal error occurs
+## LazyVim setup
 
-### Interpolation Resolution Settings  
-* **`hydralance.excludePatterns`** *(array, default: [".venv/**"])*  
-  Glob patterns to exclude from YAML file indexing for interpolation resolution
+Requires Neovim **0.11+**. Copy
+[`examples/lazyvim.lua`](examples/lazyvim.lua) to
+`~/.config/nvim/lua/plugins/hydradex.lua`.
 
-* **`hydralance.matchFilter`** *(enum, default: "top matches only")*  
-  Controls which interpolation matches are shown:
-  - `"all"` - Shows all matches found
-  - `"top matches only"` - Shows only the highest level matches found
-  - `"perfect matches only"` - Shows only matches that exactly match the interpolation depth
+Ensure `hydradex` is on Neovim's `PATH`. If using a project-local installation,
+change `cmd` to the absolute path of that environment's `hydradex` executable.
+Open a YAML file in a project with `pyproject.toml` or `.git` and check `:LspInfo`.
 
-* **`hydralance.isolateWorkspaceFolders`** *(boolean, default: true)*  
-  When enabled, interpolation resolution only considers files within the same workspace folder
+LazyVim's usual `gd`, `K`, completion, and diagnostic navigation work through LSP.
+HydraDex can run alongside `yamlls` for YAML schemas and formatting. Enable
+LazyVim's YAML language extra if you want those additional features.
 
-## Commands
+The Python backend discovers conventional project environments. If HydraDex
+is installed separately from your application, set `pythonPath` to the project's
+Python executable or virtual environment. `extraPaths` supports additional source
+directories; project-root and existing `src/` directories are included automatically.
 
-Access these commands via the Command Palette (`Ctrl+Shift+P`):
+To manually refresh the index:
 
-* **`HydraLance: Generate Diagnostic Info`** - Generate diagnostic information for troubleshooting
-* **`HydraLance: Show Logs`** - Show extension logs in the output panel  
-* **`HydraLance: Refresh YAML Index`** - Refresh the YAML file index
+```lua
+for _, client in ipairs(vim.lsp.get_clients({ bufnr = 0, name = "hydradex" })) do
+  client:request("workspace/executeCommand", { command = "hydradex.refreshIndex" })
+end
+```
 
-## Notice
+### Plain Neovim
 
-HydraLance is an independent project and is not affiliated with or endorsed by the Hydra project or its maintainers. Use at your own discretion.
+```lua
+vim.lsp.config("hydradex", {
+  cmd = { "hydradex", "--stdio" },
+  filetypes = { "yaml" },
+  root_markers = { "pyproject.toml", ".git" },
+})
+vim.lsp.enable("hydradex")
+```
 
+## Python library
+
+```python
+from pathlib import Path
+from lsprotocol.types import Position
+from hydradex import HydraDex
+
+root = Path("/path/to/project")
+uri = (root / "conf" / "model.yaml").as_uri()
+
+with HydraDex([root]) as hydra:
+    hydra.update(uri, "_target_: my_app.Model\n", version=1)
+    definitions = hydra.definitions(uri, Position(line=0, character=15))
+    diagnostics = hydra.diagnostics(uri)
+    hover = hydra.hover(uri, Position(line=0, character=15))
+```
+
+Results use `lsprotocol` types. All positions are zero-based UTF-16, matching the
+server's advertised position encoding. Library instances are synchronous and
+single-thread-owned; the LSP adapter runs analysis on a serialized worker.
+
+- `update(uri, text, version=None)` opens/replaces an in-memory YAML buffer.
+- `close(uri)` discards that buffer and restores its disk contents in the index.
+- `definitions(uri, position)`, `completions(...)`, `hover(...)`, and
+  `diagnostics(uri)` expose editor-independent intelligence.
+- `refresh()` rescans files while retaining buffer overlays.
+- `shutdown()` releases backend processes; subsequent requests can restart them.
+- Use the context manager to guarantee process cleanup.
+
+Backend failures raise `hydradex.python.BackendError`. The language server reports
+backend availability separately from unresolved-target diagnostics.
+
+## Configuration
+
+Pass settings as `initializationOptions` (Neovim `init_options`) or under
+`settings.hydradex`. `workspace/didChangeConfiguration` replaces the configuration
+and rebuilds analysis while preserving unsaved YAML buffers.
+
+| LSP setting | Library setting | Default |
+| --- | --- | --- |
+| `pythonPath` | `python_path` | Automatic environment discovery |
+| `extraPaths` | `extra_paths` | `[]` |
+| `configRoots` | `config_roots` | `[]` |
+| `backendCommand` | `backend_command` | `ty` executable + `server` |
+| `backendTimeout` | `backend_timeout` | `15` seconds per backend operation |
+| `matchFilter` | `match_filter` | `"top matches only"` |
+| `isolateWorkspaceFolders` | `isolate_workspace_folders` | `true` |
+| `excludePatterns` | `exclude_patterns` | `.git/`, `.venv/`, `venv/`, `node_modules/`, `__pycache__/`, `dist/`, `build/` |
+
+Paths are relative to each workspace root. Exclusions use gitignore-style patterns
+through `pathspec`. `matchFilter` also accepts `"all"` and `"perfect matches only"`.
+Matches are ranked by the longest matching path suffix and deduplicated by key
+location. Workspace isolation happens before ranking.
+
+Set `configRoots` for nonstandard Hydra config directories. Relative defaults
+search the source directory and its ancestors within the workspace, followed by
+configured config roots. Absolute defaults search configured roots, or conventional
+`conf` / `config` / `configs` ancestors, falling back to the workspace root.
+
+## Dependencies
+
+- **ty**, maintained by Astral, is the Python analysis backend and the
+  development type checker. Its keyword-argument completions preserve Python
+  calling conventions directly.
+- **Pygls / lsprotocol** handle both sides of LSP, including message framing,
+  document synchronization, and protocol types.
+- **PyYAML** provides syntax trees and source ranges without constructing YAML
+  application objects; **pathspec** provides exclusion matching.
+
+Python helper documents are opened in memory through LSP. No shadow files are
+written to the project and target modules are not imported or executed by HydraDex.
+
+### Static-analysis boundaries
+
+HydraDex indexes possible definitions; it does not execute Hydra's composition
+engine. Override completion follows literal defaults references, package directives
+and overrides, `_self_` ordering, and mapping merges. Full defaults-group selection
+overrides (`override group: option`), runtime resolver calls, dynamic `_target_`
+interpolations, and Python-defined ConfigStore entries are not evaluated. Navigation
+results can include multiple config alternatives. Plain node interpolations inside mapping
+values are supported; arbitrary OmegaConf resolver grammar is not interpreted.
+
+Parameter completion repairs the current block-style YAML key while typing. Python
+resolution remains subject to ty's support for dynamic code.
+Filesystem watching uses the editor's LSP watcher support; `refreshIndex` is available
+for clients without it. Python files changed on disk are picked up by watcher-driven
+backend restarts; unsaved Python buffers in another LSP client are not shared.
+
+## Development and tests
+
+```sh
+uv sync --locked
+uv run pytest --cov=hydradex --cov-report=term-missing
+uv run ruff check .
+uv run ruff format --check .
+uv run ty check src
+uv build
+```
+
+Tests cover YAML syntax and source positions, interpolation ranking and isolation,
+defaults navigation, buffer overlays, actual ty analysis, process lifecycle,
+and a real stdio LSP session. A headless Neovim test loads the supplied LazyVim
+server configuration and exercises attachment, navigation, and completion when
+Neovim 0.11+ is available. CI runs the suite on Linux, macOS, and Windows and runs
+the Neovim integration separately on Linux.
+
+HydraDex is MIT-licensed and independent of the Hydra project.

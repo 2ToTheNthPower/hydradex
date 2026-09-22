@@ -1,0 +1,5 @@
+# gd on the target opens examples/components.py; K shows its fields.
+_target_: examples.components.Model
+input_dim: ${dataset.feature_dim}
+hidden_dim: 64
+activation: relu

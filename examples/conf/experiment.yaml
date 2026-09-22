@@ -1,0 +1,20 @@
+# Inherits the defaults and targets from config.yaml.
+defaults:
+  - config
+  - _self_
+
+model:
+  # Type a new key here: input_dim, activation, dropout are suggested.
+  # dropout comes from the Python signature, even though small.yaml omits it.
+  hidden_dim: 128
+
+dataset:
+  # Remaining inherited keys and Python parameters are available here too.
+  samples: 1000
+
+optimizer:
+  lr: 0.0003
+
+training:
+  # Type "ba" on a new indented line to complete batch_size from config.yaml.
+  epochs: 20

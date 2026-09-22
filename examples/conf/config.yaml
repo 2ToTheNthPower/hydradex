@@ -1,0 +1,9 @@
+defaults:
+  - model: small
+  - dataset: synthetic
+  - optimizer: adam
+  - _self_
+
+training:
+  epochs: 5
+  batch_size: 16

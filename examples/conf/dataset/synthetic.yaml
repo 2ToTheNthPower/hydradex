@@ -1,0 +1,5 @@
+_target_: examples.components.Dataset
+name: synthetic
+samples: 100
+feature_dim: 8
+seed: 42
