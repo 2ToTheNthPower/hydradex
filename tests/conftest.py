@@ -1,8 +1,34 @@
+import json
+import sys
 from pathlib import Path
 
 import pytest
+from lsprotocol import types as lsp
 
-from hydradex import HydraDex
+from hydradex import HydraDex, Settings
+
+FAKE_BACKEND = Path(__file__).with_name("fake_backend.py")
+REPO = Path(__file__).resolve().parents[1]
+
+
+def fake_backend(*args: str) -> tuple[str, ...]:
+    return (sys.executable, str(FAKE_BACKEND), *args)
+
+
+def fake_settings(*args: str, **kwargs) -> Settings:
+    return Settings(backend_command=fake_backend(*args), **kwargs)
+
+
+def logged(path: Path) -> list[dict]:
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text().splitlines()]
+
+
+def cursor(text: str) -> tuple[str, lsp.Position]:
+    """Split text at the `|` cursor marker (a code-point column; tests use ASCII)."""
+    before, after = text.split("|")
+    return before + after, lsp.Position(before.count("\n"), len(before.split("\n")[-1]))
 
 
 @pytest.fixture
