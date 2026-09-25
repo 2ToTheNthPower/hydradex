@@ -12,6 +12,10 @@ import yaml
 from lsprotocol import types as lsp
 from yaml.nodes import MappingNode, Node, ScalarNode, SequenceNode
 
+NULL_TAG = "tag:yaml.org,2002:null"
+CURSOR = "__hydradex_cursor__"
+_NODE_LIMIT = 20000
+
 
 def uri_path(uri: str) -> Path | None:
     parsed = urlparse(uri)
@@ -24,6 +28,23 @@ def utf16(text: str) -> int:
     return len(text.encode("utf-16-le")) // 2
 
 
+def header(text: str) -> dict[str, str]:
+    """Hydra `# @key value` directives, read only from the leading comment block."""
+    result = {}
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if not stripped.startswith("#"):
+            break
+        comment = stripped[1:].strip()
+        if comment.startswith("@"):
+            key, _, value = comment[1:].partition(" ")
+            if key:
+                result[key] = value.strip()
+    return result
+
+
 @dataclass
 class Entry:
     path: tuple[str, ...]
@@ -34,6 +55,8 @@ class Entry:
 
 @dataclass
 class KeyContext:
+    """A mapping key being typed, located by re-parsing with the key repaired."""
+
     document: Document
     parent: tuple[str, ...]
     siblings: set[str]
@@ -49,17 +72,15 @@ class Document:
     text: str
     version: int | None = None
     entries: list[Entry] = field(default_factory=list, init=False)
-    roots: list[Node] = field(default_factory=list, init=False)
     errors: list[lsp.Diagnostic] = field(default_factory=list, init=False)
 
     def __post_init__(self) -> None:
         self.lines = self.text.split("\n")
+        self.header = header(self.text)
         try:
-            self.roots = [
-                node for node in yaml.compose_all(self.text, Loader=yaml.SafeLoader) if node
-            ]
-            budget = [20000]
-            for node in self.roots:
+            roots = [node for node in yaml.compose_all(self.text, Loader=yaml.SafeLoader) if node]
+            budget = [_NODE_LIMIT]
+            for node in roots:
                 self._walk(node, (), frozenset(), budget)
         except (yaml.YAMLError, RecursionError, ValueError) as exc:
             mark = getattr(exc, "problem_mark", None)
@@ -93,6 +114,8 @@ class Document:
             for i, value in enumerate(node.value):
                 self._walk(value, (*path, str(i)), ancestors, budget)
 
+    # Positions: PyYAML marks count code points; LSP positions count UTF-16 units.
+
     def position(self, line: int, column: int) -> lsp.Position:
         line = max(0, min(line, len(self.lines) - 1))
         return lsp.Position(line, utf16(self.lines[line][:column]))
@@ -123,19 +146,21 @@ class Document:
             < (node.end_mark.line, node.end_mark.column)
         )
 
+    def targets(self) -> list[Entry]:
+        return [entry for entry in self.entries if entry.key.value == "_target_"]
+
     def target_at(self, position: lsp.Position) -> Entry | None:
         return next(
             (
                 entry
-                for entry in self.entries
-                if entry.key.value == "_target_"
-                and isinstance(entry.value, ScalarNode)
-                and self.contains(entry.value, position)
+                for entry in self.targets()
+                if isinstance(entry.value, ScalarNode) and self.contains(entry.value, position)
             ),
             None,
         )
 
     def interpolation_at(self, position: lsp.Position) -> tuple[str, Entry] | None:
+        """A plain `${node.path}` under the cursor, inside a scalar value."""
         if not 0 <= position.line < len(self.lines):
             return None
         col = self.column(position)
@@ -152,7 +177,7 @@ class Document:
             return None
         line = self.lines[position.line]
         col = self.column(position)
-        match = re.fullmatch(r"(\s*(?:-\s+)?)([\w]*)", line[:col])
+        match = re.fullmatch(r"(\s*(?:-\s+)?)(\w*)", line[:col])
         if not match:
             return None
         suffix = re.match(r"\w*", line[col:])
@@ -161,11 +186,10 @@ class Document:
         has_colon = tail.lstrip().startswith(":")
         if tail.strip() and not has_colon and not tail.lstrip().startswith("#"):
             return None
-        marker = "__hydradex_cursor__"
         lines = self.lines.copy()
-        lines[position.line] = match[1] + marker + (tail if has_colon else ": null")
+        lines[position.line] = match[1] + CURSOR + (tail if has_colon else ": null")
         repaired = Document(self.uri, "\n".join(lines))
-        entry = next((e for e in repaired.entries if e.key.value == marker), None)
+        entry = next((e for e in repaired.entries if e.key.value == CURSOR), None)
         if entry is None:
             return None
         siblings = {key.value for key, _ in entry.mapping.value if isinstance(key, ScalarNode)}
@@ -189,20 +213,20 @@ class Document:
             target,
         )
 
-    def parameter_context(
-        self, position: lsp.Position
-    ) -> tuple[str, set[str], str, lsp.Range, bool] | None:
-        context = self.key_context(position)
-        if context is None or context.target is None:
-            return None
-        return (context.target, context.siblings, context.prefix, context.span, context.has_colon)
-
 
 @dataclass(frozen=True)
 class Default:
+    """One defaults-list reference such as `group@package: option` or `_self_`."""
+
     name: str
     node: ScalarNode
     package: str | None = None
+    optional: bool = False
+
+    @property
+    def group(self) -> tuple[str, ...]:
+        """The config group as written, e.g. `("db",)` for `/db: mysql` or `db/mysql`."""
+        return tuple(self.name.lstrip("/").split("/")[:-1])
 
 
 def defaults(document: Document, *, include_self: bool = False) -> list[Default]:
@@ -212,20 +236,23 @@ def defaults(document: Document, *, include_self: bool = False) -> list[Default]
             continue
         for item in entry.value.value:
             if isinstance(item, ScalarNode):
-                if (
-                    include_self or item.value != "_self_"
-                ) and item.tag != "tag:yaml.org,2002:null":
-                    name, _, package = item.value.partition("@")
-                    result.append(Default(name, item, package or None))
+                if item.tag == NULL_TAG or (item.value == "_self_" and not include_self):
+                    continue
+                name, _, package = item.value.partition("@")
+                result.append(Default(name, item, package or None))
             elif isinstance(item, MappingNode):
                 for group, option in item.value:
                     if not isinstance(group, ScalarNode):
                         continue
-                    name, _, package = re.sub(
-                        r"^(?:(?:override|optional)\s+)+", "", group.value
-                    ).partition("@")
+                    keywords = re.match(r"^(?:(?:override|optional)\s+)*", group.value)
+                    optional = "optional" in keywords[0].split() if keywords else False
+                    name, _, package = group.value[keywords.end() if keywords else 0 :].partition(
+                        "@"
+                    )
                     options = option.value if isinstance(option, SequenceNode) else [option]
                     for value in options:
-                        if isinstance(value, ScalarNode) and value.tag != "tag:yaml.org,2002:null":
-                            result.append(Default(f"{name}/{value.value}", value, package or None))
+                        if isinstance(value, ScalarNode) and value.tag != NULL_TAG:
+                            result.append(
+                                Default(f"{name}/{value.value}", value, package or None, optional)
+                            )
     return result

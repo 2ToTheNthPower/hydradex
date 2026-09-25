@@ -128,24 +128,35 @@ with HydraDex([root]) as hydra:
 
 Results use `lsprotocol` types. All positions are zero-based UTF-16, matching the
 server's advertised position encoding. Library instances are synchronous and
-single-thread-owned; the LSP adapter runs analysis on a serialized worker.
+owned by one thread; the language server runs every call on a single worker.
 
 - `update(uri, text, version=None)` opens/replaces an in-memory YAML buffer.
 - `close(uri)` discards that buffer and restores its disk contents in the index.
 - `definitions(uri, position)`, `completions(...)`, `hover(...)`, and
   `diagnostics(uri)` expose editor-independent intelligence.
-- `refresh()` rescans files while retaining buffer overlays.
-- `shutdown()` releases backend processes; subsequent requests can restart them.
+- `files_changed(events)` applies on-disk YAML changes and forwards Python changes
+  to the running ty processes, which invalidates cached Python answers.
+- `reconfigure(roots=..., settings=...)` replaces roots or settings, keeping buffers.
+- `refresh()` rescans files and restarts Python backends, retaining buffers.
+- `shutdown()` releases backend processes; subsequent requests restart them.
 - Use the context manager to guarantee process cleanup.
 
-Backend failures raise `hydradex.python.BackendError`. The language server reports
-backend availability separately from unresolved-target diagnostics.
+Backend failures raise `hydradex.BackendError`. A backend that fails to start is
+retried after 30 seconds, or sooner after a Python file change or `refresh()`.
+The language server reports backend availability as a `backend-unavailable`
+diagnostic and answers requests with empty results rather than errors.
 
 ## Configuration
 
-Pass settings as `initializationOptions` (Neovim `init_options`) or under
-`settings.hydradex`. `workspace/didChangeConfiguration` replaces the configuration
-and rebuilds analysis while preserving unsaved YAML buffers.
+Pass settings as `initializationOptions` (Neovim `init_options`), either flat or
+under a `hydradex` key, and/or as `settings.hydradex`. A
+`workspace/didChangeConfiguration` payload with a `hydradex` section overrides the
+initialization options key by key; `null` restores a key's default. Payloads
+without that section are ignored, except that clients supporting
+`workspace/configuration` are asked for the `hydradex` section. Analysis is
+rebuilt only when the resulting settings differ, and unsaved buffers are kept.
+Unknown keys are reported with `window/showMessage`, and invalid values are
+rejected without changing the current configuration.
 
 | LSP setting | Library setting | Default |
 | --- | --- | --- |
@@ -178,14 +189,22 @@ configured config roots. Absolute defaults search configured roots, or conventio
 - **PyYAML** provides syntax trees and source ranges without constructing YAML
   application objects; **pathspec** provides exclusion matching.
 
-Python helper documents are opened in memory through LSP. No shadow files are
-written to the project and target modules are not imported or executed by HydraDex.
+Python helper code is sent to ty as a single in-memory document. No shadow files
+are written to the project and target modules are not imported or executed by
+HydraDex. ty answers are cached per Python project until Python files change.
+
+Diagnostics are computed shortly after typing pauses, one `_target_` at a time,
+so completion and hover stay responsive while ty is busy.
 
 ### Static-analysis boundaries
 
 HydraDex indexes possible definitions; it does not execute Hydra's composition
-engine. Override completion follows literal defaults references, package directives
-and overrides, `_self_` ordering, and mapping merges. Full defaults-group selection
+engine. Override completion follows literal defaults references, `_self_` ordering,
+and mapping merges. Package placement follows Hydra 1.3: nested configs are placed
+under their parent's package, `group@package` overrides are relative (`_here_`,
+`_group_`, `_global_`), and `# @package` headers are absolute and read only from
+the leading comment block. The test suite checks these rules against real Hydra
+composition. Full defaults-group selection
 overrides (`override group: option`), runtime resolver calls, dynamic `_target_`
 interpolations, and Python-defined ConfigStore entries are not evaluated. Navigation
 results can include multiple config alternatives. Plain node interpolations inside mapping
@@ -194,8 +213,8 @@ values are supported; arbitrary OmegaConf resolver grammar is not interpreted.
 Parameter completion repairs the current block-style YAML key while typing. Python
 resolution remains subject to ty's support for dynamic code.
 Filesystem watching uses the editor's LSP watcher support; `refreshIndex` is available
-for clients without it. Python files changed on disk are picked up by watcher-driven
-backend restarts; unsaved Python buffers in another LSP client are not shared.
+for clients without it. Python files changed on disk are forwarded to ty; unsaved
+Python buffers in another LSP client are not shared.
 
 ## Development and tests
 
@@ -208,11 +227,21 @@ uv run ty check src
 uv build
 ```
 
-Tests cover YAML syntax and source positions, interpolation ranking and isolation,
-defaults navigation, buffer overlays, actual ty analysis, process lifecycle,
-and a real stdio LSP session. A headless Neovim test loads the supplied LazyVim
-server configuration and exercises attachment, navigation, and completion when
-Neovim 0.11+ is available. CI runs the suite on Linux, macOS, and Windows and runs
-the Neovim integration separately on Linux.
+Tests cover:
+
+- YAML syntax, source positions, and Hydra header parsing;
+- package placement and static composition, compared against real Hydra across
+  nested groups, package overrides, headers, and `_self_` ordering;
+- interpolation ranking and isolation, defaults navigation, and buffer overlays;
+- real ty analysis, including Python changes picked up without a restart;
+- the JSON-RPC client and backend lifecycle against a scripted fake backend:
+  timeouts, crashes, error responses, and cleanup;
+- real stdio LSP sessions: configuration merging, debounced diagnostics, request
+  ordering, and requests answered while slow diagnostics run.
+
+A headless Neovim test loads the supplied LazyVim server configuration and
+exercises attachment, navigation, and completion when Neovim 0.11+ is available.
+CI runs the suite on Linux, macOS, and Windows and runs the Neovim integration
+separately on Linux.
 
 HydraDex is MIT-licensed and independent of the Hydra project.
